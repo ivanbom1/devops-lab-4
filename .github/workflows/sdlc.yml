@@ -1,0 +1,125 @@
+name: sdlc
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE: citybike:${{ github.sha }}
+  TARGET_URL: http://localhost:4173
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg GITHUB_SHA=${{ github.sha }} -t "$IMAGE" .
+      - run: docker save "$IMAGE" -o /tmp/citybike.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp/citybike.tar
+
+  staging:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: citybike-image, path: /tmp }
+      - run: docker load -i /tmp/citybike.tar
+      - name: Gate staging
+        run: |
+          docker rm -f citybike-gate 2>/dev/null || true
+          docker run -d --name citybike-gate -p 4173:4173 -e APP_ENV=staging "$IMAGE"
+          trap 'docker logs citybike-gate 2>&1 | tail -20; docker rm -f citybike-gate' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS "$TARGET_URL/health" >/dev/null && break
+            [ "$i" = 30 ] && { echo "TIMEOUT waiting for /health"; exit 1; }
+            sleep 1
+          done
+          bash ./scripts/test-staging.sh
+
+  uat:
+    needs: staging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: citybike-image, path: /tmp }
+      - run: docker load -i /tmp/citybike.tar
+      - name: Gate uat
+        run: |
+          docker rm -f citybike-gate 2>/dev/null || true
+          docker run -d --name citybike-gate -p 4173:4173 -e APP_ENV=uat "$IMAGE"
+          trap 'docker logs citybike-gate 2>&1 | tail -20; docker rm -f citybike-gate' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS "$TARGET_URL/health" >/dev/null && break
+            [ "$i" = 30 ] && { echo "TIMEOUT waiting for /health"; exit 1; }
+            sleep 1
+          done
+          bash ./scripts/test-uat.sh
+
+  oat:
+    needs: uat
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: citybike-image, path: /tmp }
+      - run: docker load -i /tmp/citybike.tar
+      - name: Gate oat
+        run: |
+          docker rm -f citybike-gate 2>/dev/null || true
+          docker run -d --name citybike-gate -p 4173:4173 -e APP_ENV=oat "$IMAGE"
+          trap 'docker logs citybike-gate 2>&1 | tail -20; docker rm -f citybike-gate' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS "$TARGET_URL/health" >/dev/null && break
+            [ "$i" = 30 ] && { echo "TIMEOUT waiting for /health"; exit 1; }
+            sleep 1
+          done
+          bash ./scripts/test-oat.sh
+
+  preprod:
+    needs: oat
+    runs-on: ubuntu-latest
+    env:
+      PROD_API_KEY: ${{ secrets.PROD_API_KEY }}
+      IMAGE_NAME: citybike:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: citybike-image, path: /tmp }
+      - run: docker load -i /tmp/citybike.tar
+      - name: Gate preprod
+        run: |
+          docker rm -f citybike-gate 2>/dev/null || true
+          docker run -d --name citybike-gate -p 4173:4173 -e APP_ENV=preprod -e PROD_API_KEY "$IMAGE"
+          trap 'docker logs citybike-gate 2>&1 | tail -20; docker rm -f citybike-gate' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS "$TARGET_URL/health" >/dev/null && break
+            [ "$i" = 30 ] && { echo "TIMEOUT waiting for /health"; exit 1; }
+            sleep 1
+          done
+          bash ./scripts/test-preprod.sh
+
+  prod:
+    needs: preprod
+    runs-on: ubuntu-latest
+    env:
+      PROD_API_KEY: ${{ secrets.PROD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: citybike-image, path: /tmp }
+      - run: docker load -i /tmp/citybike.tar
+      - name: Gate prod
+        run: |
+          docker rm -f citybike-gate 2>/dev/null || true
+          docker run -d --name citybike-gate -p 4173:4173 -e APP_ENV=production -e PROD_API_KEY "$IMAGE"
+          trap 'docker logs citybike-gate 2>&1 | tail -20; docker rm -f citybike-gate' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS "$TARGET_URL/health" >/dev/null && break
+            [ "$i" = 30 ] && { echo "TIMEOUT waiting for /health"; exit 1; }
+            sleep 1
+          done
+          bash ./scripts/test-prod.sh
